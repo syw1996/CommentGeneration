@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=2,3,4,5 deepspeed --num_gpus=4 train.py --deepspeed ds_config.json
