@@ -1,10 +1,12 @@
 import os
+import pickle
 from typing import Dict
 
 import torch
 from torch.utils.data.dataset import Dataset
 from transformers import PreTrainedTokenizer, logging, DataCollatorForLanguageModeling
 from tqdm import tqdm
+from typing import Dict
 
 import sys 
 sys.path.append("..") 
@@ -69,24 +71,54 @@ def merge_lyric2review():
         fw.write("\n".join(merged_lines))
 
 
-def build_train_test_file(tokenizer):
+def build_seq2seq_train_test_file():
     from sklearn.model_selection import train_test_split
     with open("processed_reviews/lyric_to_review.txt", "r")  as fr:
-        # data = [line.strip() for line in fr.readlines()]
-        data = []
-        for line in tqdm(fr.readlines()):
+        src_data, tgt_data = [], []
+        for line in fr.readlines():
+            lyric, view = line.strip().split("[RS]")
+            src_data.append(lyric)
+            # Seq2SeqDataCollator中含有shift_tokens_right，会右移decoder的input_ids并在头部增加bos_id
+            tgt_data.append(view)
+    src_train, src_test, tgt_train, tgt_test = train_test_split(src_data, tgt_data, test_size=0.01, random_state=123) 
+    with open("processed_reviews/seq2seq/train.source", "w") as fw:
+        fw.write("\n".join(src_train) + "\n")
+    with open("processed_reviews/seq2seq/test.source", "w") as fw:
+        fw.write("\n".join(src_test) + "\n")
+    with open("processed_reviews/seq2seq/train.target", "w") as fw:
+        fw.write("\n".join(tgt_train) + "\n")
+    with open("processed_reviews/seq2seq/test.target", "w") as fw:
+        fw.write("\n".join(tgt_test) + "\n")
+
+
+def build_gpt2_train_test_file(tokenizer):
+    from sklearn.model_selection import train_test_split
+    with open("processed_reviews/lyric_to_review.txt", "r")  as fr:
+        data = [line.strip() for line in fr.readlines()]
+        train, test = train_test_split(data, test_size=0.01, random_state=123) 
+    with open("processed_reviews/train_dataset.txt", "w") as fw:
+        fw.write("\n".join(train) + "\n")
+    with open("processed_reviews/test_dataset.txt", "w") as fw:
+        fw.write("\n".join(test) + "\n")
+    def obtain_tokenized_file(lines):
+        tokenized_data = []
+        for line in tqdm(lines):
             token_ids = list(map(str, tokenizer.encode(line, add_special_tokens=False)))
             if len(token_ids) <= 512:
-                data.append(" ".join(token_ids))
-    train, test = train_test_split(data, test_size=0.05) 
+                tokenized_data.append(" ".join(token_ids))
+        return tokenized_data
     with open("processed_reviews/tokenized_train_dataset.txt", "w") as fw:
-        fw.write("\n".join(train))
+        fw.write("\n".join(obtain_tokenized_file(train)) + "\n")
     with open("processed_reviews/tokenized_test_dataset.txt", "w") as fw:
-        fw.write("\n".join(test))
+        fw.write("\n".join(obtain_tokenized_file(test)) + "\n")
+
 
 
 if __name__ == "__main__":
     # merge_lyric2review()
+    """
     tokenizer = GuyuTokenizer.from_pretrained("../model/transformers-gpt2-base/vocab.txt")
     tokenizer.add_tokens(['SINGER'])
-    build_train_test_file(tokenizer)
+    build_gpt2_train_test_file(tokenizer)
+    """
+    build_seq2seq_train_test_file()
