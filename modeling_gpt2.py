@@ -23,7 +23,7 @@ from transformers.modeling_utils import (
 # from transformers.activations import ACT2FN
 from utils import gelu
 
-from ipdb import launch_ipdb_on_exception, set_trace
+from ipdb import set_trace
 
 logger = logging.get_logger(__name__)
 
@@ -90,13 +90,13 @@ class GPT2Attention(nn.Module):
             # if only "normal" attention layer implements causal mask
             query_length, key_length = query.size(-2), key.size(-2)
             causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length].bool()
-            # attn_weights = torch.where(causal_mask, attn_weights, self.masked_bias.to(attn_weights.dtype))
-            attn_weights = torch.where(causal_mask, attn_weights, torch.tensor(float("-inf")).to(attn_weights.dtype).to(attn_weights.device))
+            attn_weights = torch.where(causal_mask, attn_weights, self.masked_bias.to(attn_weights.dtype))
+            # attn_weights = torch.where(causal_mask, attn_weights, torch.tensor(float("-inf")).to(attn_weights.dtype).to(attn_weights.device))
         
         if attention_mask is not None:
             # Apply the attention mask
-            # attn_weights = attn_weights + attention_mask
-            attn_weights.masked_fill_(attention_mask, float("-inf"))
+            attn_weights = attn_weights + attention_mask
+            # attn_weights.masked_fill_(attention_mask, float("-inf"))
 
         attn_weights = nn.Softmax(dim=-1)(attn_weights)
         attn_weights = self.attn_dropout(attn_weights)
@@ -392,7 +392,7 @@ class GPT2Model(GPT2PreTrainedModel):
         if position_ids is None:
             position_ids = torch.arange(past_length, input_shape[-1] + past_length, dtype=torch.long, device=device)
             position_ids = position_ids.unsqueeze(0).view(-1, input_shape[-1])
-
+        
         # GPT2Attention mask.
         if attention_mask is not None:
             assert batch_size > 0, "batch_size has to be defined and > 0"
@@ -411,9 +411,9 @@ class GPT2Model(GPT2PreTrainedModel):
             # effectively the same as removing these entirely.
             attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
             
-            # attention_mask = (1.0 - attention_mask) * -10000.0
+            attention_mask = (1.0 - attention_mask) * -10000.0
             # obtain bool type attention_mask
-            attention_mask = (1.0 - attention_mask).bool()
+            # attention_mask = (1.0 - attention_mask).bool()
 
         # If a 2D ou 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
@@ -604,10 +604,11 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         }
 
     @staticmethod
-    def from_pretrained(pretrained_model_path):
+    def from_pretrained(pretrained_model_path, config=None):
         import os
         from transformers import GPT2Config
-        config = GPT2Config.from_json_file(os.path.join(pretrained_model_path, "config.json"))
+        if config is None:
+            config = GPT2Config.from_json_file(os.path.join(pretrained_model_path, "config.json"))
         para_dict = torch.load(os.path.join(pretrained_model_path, "pytorch_model.bin"))
         model = GPT2LMHeadModel(config=config)
         
@@ -646,7 +647,8 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             ``-100`` are ignored (masked), the loss is only computed for labels in ``[0, ..., config.vocab_size]``
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+        
+        # past_key_values: [layer_num, 2, [batch_size, head_num, seq_num, 64]] (key&values)
         transformer_outputs = self.transformer(
             input_ids,
             past_key_values=past_key_values,
@@ -673,12 +675,51 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
 
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = lm_logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            use_loss_mask = True
+            seq2seq_loss = False
+            if use_loss_mask:
+                # Obtain loss mask
+                if seq2seq_loss:
+                    loss_mask = labels.new_zeros(labels.shape, dtype=torch.bool).to(labels.device)
+                    eos = 3
+                    for i in range(labels.size(0)):
+                        end = int((labels[i] == eos).nonzero(as_tuple=True)[0]) + 1 \
+                                if (labels[i] == eos).sum() != 0 else labels.size(1)
+                        for j in range(end):
+                            loss_mask[i, j] = True
+                    
+                    # Seq2SeqDataCollator has shifted the labels
+                    selected_labels = torch.masked_select(labels, loss_mask).contiguous()
+                    loss_mask = loss_mask.unsqueeze(-1).expand(lm_logits.size())
+                    selected_logits = torch.masked_select(lm_logits, loss_mask).contiguous()
+                    # Flatten the tokens
+                    loss_fct = CrossEntropyLoss()
+                    loss = loss_fct(selected_logits.view(-1, lm_logits.size(-1)), selected_labels.view(-1))
+                else:
+                    loss_mask = labels.new_zeros(labels.shape, dtype=torch.bool).to(labels.device)
+                    rs, eos = 5, 3
+                    for i in range(labels.size(0)):
+                        start = int((labels[i] == rs).nonzero(as_tuple=True)[0]) + 1
+                        end = int((labels[i] == eos).nonzero(as_tuple=True)[0]) + 1
+                        for j in range(start, end):
+                            loss_mask[i, j] = True
+
+                    # Shift so that tokens < n predict n
+                    shift_logits = lm_logits[..., :-1, :].contiguous()
+                    selected_labels = torch.masked_select(labels, loss_mask).contiguous()
+                    loss_mask = loss_mask[..., 1:].contiguous()
+                    loss_mask = loss_mask.unsqueeze(-1).expand(shift_logits.size())
+                    selected_logits = torch.masked_select(shift_logits, loss_mask).contiguous()
+                    # Flatten the tokens
+                    loss_fct = CrossEntropyLoss()
+                    loss = loss_fct(selected_logits.view(-1, shift_logits.size(-1)), selected_labels.view(-1))
+            else:   
+                # Shift so that tokens < n predict n
+                shift_logits = lm_logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
