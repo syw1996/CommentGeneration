@@ -1,0 +1,17 @@
+---
+model_path: "./model/lyric_to_review_batch24_only_review_loss/checkpoint-180000-best"
+output_path: "./gen/only_review_loss_results/generated_reviews_step_180000_test.txt"
+device: 0
+max_len: 60
+num_sample: 1
+batch_size: 10
+quantile:
+  - {starting: 0,  end: 1,   k: 1000, p: 0.95, bias: 4}
+  - {starting: 1,  end: 10,  k: 30,   p: 0.80, bias: 4}
+  - {starting: 10, end: 60,  k: 10,   p: 0.80, bias: 0}
+#  - {starting: 0,  end: 1,   k: 1000, p: 0.95, bias: 4}
+#  - {starting: 1,  end: 10,  k: 200,  p: 0.80, bias: 4}
+#  - {starting: 10, end: 35,  k: 30,   p: 0.50, bias: 4}
+#  - {starting: 35, end: 60,  k: 10,   p: 0.10, bias: 0}
+reserved_tokens: [".", ",", "。", "，", "!", "！","?","？"]
+stop_tokens: ["《", "》"]
